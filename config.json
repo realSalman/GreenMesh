@@ -1,0 +1,212 @@
+{
+    "auto_start_runners": true,
+    "api": {
+        "host": "0.0.0.0",
+        "port": 8080,
+        "health_endpoint": "/health",
+        "cors_allow_origins": [
+            "http://localhost:3000",
+            "http://localhost:3001"
+        ]
+    },
+    "metrics": {
+        "gpu": {
+            "enabled": true,
+            "vendors": [
+                "nvidia",
+                "amd"
+            ],
+            "poll_interval_seconds": 2,
+            "history_points": 60,
+            "command_timeout_seconds": 3,
+            "rate_limit_requests_per_minute": 120
+        }
+    },
+    "mcp": {
+        "enabled": false,
+        "endpoint": "/v1/mcp",
+        "upstream_path": "/mcp"
+    },
+    "request_timeout_seconds": 1800,
+    "streaming_timeout_seconds": 0,
+    "retry_config": {
+        "max_retries": 3,
+        "base_delay_seconds": 2,
+        "max_delay_seconds": 30,
+        "retry_on_model_loading": true
+    },
+    "runner1": {
+        "type": "llama-server",
+        "path": "d:/flexllama-main/llama/llama-server.exe",
+        "host": "127.0.0.1",
+        "port": 8085,
+        "inherit_env": true,
+        "env": {
+            "MY_VAR": "1",
+            "RUNNER_SPECIFIC_VAR": "value"
+        },
+        "extra_args": [
+            "--verbose"
+        ],
+        "auto_unload_timeout_seconds": 0
+    },
+    "runner2": {
+        "type": "llama-server",
+        "path": "d:/flexllama-main/llama/llama-server.exe",
+        "host": "127.0.0.1",
+        "port": 8086,
+        "inherit_env": true,
+        "env": {},
+        "extra_args": [],
+        "auto_unload_timeout_seconds": 0
+    },
+    "runner-audio": {
+        "type": "llama-server",
+        "path": "d:/flexllama-main/llama/llama-server.exe",
+        "host": "127.0.0.1",
+        "port": 8087,
+        "inherit_env": true,
+        "env": {},
+        "extra_args": [],
+        "auto_unload_timeout_seconds": 0
+    },
+    "models": [
+        {
+            "runner": "runner1",
+            "model": "d:/flexllama-main/models/qwen2.5-0.5b-instruct-q5_k_m.gguf",
+            "model_alias": "qwen2.5-0.5b",
+            "n_ctx": 4096,
+            "n_batch": 512,
+            "u_batch": 128,
+            "n_threads": 4,
+            "offload_kqv": true,
+            "flash_attn": "on",
+            "use_mlock": true,
+            "main_gpu": 0,
+            "tensor_split": [
+                1.0,
+                0.0
+            ],
+            "n_gpu_layers": 99,
+            "jinja": true,
+            "mcp": true,
+            "env": {
+                "GGML_VULKAN_DEVICE": "0",
+                "MODEL_SPECIFIC_VAR": "example"
+            },
+            "args": ""
+        },
+        {
+            "runner": "runner2",
+            "model": "d:/flexllama-main/models/Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_F16.gguf",
+            "model_alias": "gemma-3-1b",
+            "n_ctx": 4096,
+            "n_batch": 512,
+            "u_batch": 128,
+            "n_threads": 4,
+            "offload_kqv": true,
+            "flash_attn": "on",
+            "use_mlock": true,
+            "main_gpu": 0,
+            "tensor_split": [
+                1.0,
+                0.0
+            ],
+            "n_gpu_layers": 99,
+            "jinja": true,
+            "mcp": true,
+            "env": {
+                "GGML_VULKAN_DEVICE": "0",
+                "MODEL_SPECIFIC_VAR": "example"
+            },
+            "args": ""
+        },
+        {
+            "runner": "runner2",
+            "model": "/path/to/model3.gguf",
+            "model_alias": "model3",
+            "args": "--ctx-size 8000 --batch-size 512 --threads 8 --flash-attn on --mlock --device Vulkan1"
+        },
+        {
+            "runner": "runner1",
+            "model": "/path/to/vision_model.gguf",
+            "mmproj": "/path/to/mmproj.gguf",
+            "model_alias": "vision_model",
+            "n_ctx": 32768,
+            "n_batch": 256,
+            "n_threads": 8,
+            "chat_template": "gemma",
+            "offload_kqv": true,
+            "flash_attn": "auto",
+            "use_mlock": true,
+            "tensor_split": [
+                1.0,
+                0.0
+            ],
+            "n_gpu_layers": 99,
+            "rope-scaling": "linear",
+            "rope-scale": 2,
+            "yarn-orig-ctx": 32768,
+            "args": ""
+        },
+        {
+            "runner": "runner2",
+            "model": "/path/to/reranker_model.gguf",
+            "model_alias": "reranker_model",
+            "n_ctx": 8192,
+            "n_batch": 512,
+            "n_threads": 8,
+            "offload_kqv": true,
+            "flash_attn": "on",
+            "use_mlock": true,
+            "reranking": true,
+            "tensor_split": [
+                1.0,
+                0.0
+            ],
+            "n_gpu_layers": 99,
+            "args": ""
+        },
+        {
+            "runner": "runner1",
+            "model": "/path/to/embedding_model.gguf",
+            "model_alias": "embedding_model",
+            "n_ctx": 8192,
+            "n_batch": 512,
+            "n_threads": 8,
+            "offload_kqv": true,
+            "flash_attn": "on",
+            "use_mlock": true,
+            "embedding": true,
+            "pooling": "cls",
+            "tensor_split": [
+                1.0,
+                0.0
+            ],
+            "n_gpu_layers": 99,
+            "args": ""
+        },
+        {
+            "runner": "runner-audio",
+            "model": "/path/to/Voxtral-Mini-3B.gguf",
+            "model_alias": "voxtral-audio",
+            "type": "audio",
+            "audio_encoder": "/path/to/Voxtral-Mini-3B-mmproj.gguf",
+            "n_ctx": 8192,
+            "n_gpu_layers": 99,
+            "args": ""
+        },
+        {
+            "runner": "runner-audio",
+            "model": "/path/to/qwen3-omni.gguf",
+            "model_alias": "qwen3-omni-tts",
+            "type": "audio",
+            "audio_encoder": "/path/to/qwen3-omni-mmproj.gguf",
+            "talker_model": "/path/to/qwen3-omni-talker.gguf",
+            "code2wav_model": "/path/to/qwen3-omni-code2wav.gguf",
+            "n_ctx": 8192,
+            "n_gpu_layers": 99,
+            "args": ""
+        }
+    ]
+}
