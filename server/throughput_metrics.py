@@ -1,5 +1,5 @@
 """
-Token throughput metrics collector for FlexLLama.
+Token throughput metrics collector for GreenMesh.
 
 Tracks tokens-per-second (prompt + generation) per model over time by reading
 the ``usage`` and ``timings`` objects that llama-server includes in its

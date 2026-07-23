@@ -3,16 +3,14 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "flexllama"
-version = "0.2.0"
-description = "A lightweight Python tool that easily runs multiple llama.cpp server instances with OpenAI v1 API compatibility"
+name = "greenmesh"
+version = "1.0"
+description = "Multi-GPU inference management for Large Language Models"
 readme = "README.md"
 license = {text = "BSD-3-Clause"}
-authors = [
-    {name = "Wojciech Czaplejewicz", email = "czaplejewicz@gmail.com"}
-]
+authors = []
 keywords = [
-    "flexllama",
+    "greenmesh",
     "llama",
     "llama.cpp",
     "openai",
@@ -38,13 +36,12 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yazon/flexllama"
+Homepage = "https://github.com/realSalman/greenmesh"
 
 [project.scripts]
-flexllama = "main:main_entry"
+greenmesh = "server.main:main_entry"
 
 [tool.setuptools]
-py-modules = ["main"]
 include-package-data = true
 
 [tool.setuptools.packages.find]

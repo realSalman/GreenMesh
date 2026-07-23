@@ -1,5 +1,5 @@
 """
-FlexLLama backend package.
+GreenMesh backend package.
 
 This package provides functionality for managing and running llama.cpp models.
 """

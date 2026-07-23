@@ -1,6 +1,6 @@
-# FlexLLama Configuration Guide
+# GreenMesh Configuration Guide
 
-This guide covers all configuration options available in FlexLLama's `config.json` file.
+This guide covers all configuration options available in GreenMesh's `config.json` file.
 
 ## Basic Structure
 
@@ -8,13 +8,13 @@ Edit `config.json` to configure your runners and models:
 
 ```json
 {
-    "auto_start_runners": true,
+    "auto_start_clusters": true,
     "api": {
         "host": "0.0.0.0",
         "port": 8080,
         "health_endpoint": "/health"
     },
-    "runner1": {
+    "cluster1": {
         "type": "llama-server",
         "path": "/path/to/llama-server",
         "host": "127.0.0.1",
@@ -24,7 +24,7 @@ Edit `config.json` to configure your runners and models:
     },
     "models": [
         {
-            "runner": "runner1",
+            "cluster": "cluster1",
             "model": "/path/to/model.gguf",
             "model_alias": "my-model",
             "n_ctx": 4096,
@@ -73,7 +73,7 @@ Edit `config.json` to configure your runners and models:
 
 ## Auto-unload Configuration
 
-FlexLLama supports automatic model unloading to free up RAM when models are idle. This is useful for managing memory usage when running multiple models.
+GreenMesh supports automatic model unloading to free up RAM when models are idle. This is useful for managing memory usage when running multiple models.
 
 ```json
 {
@@ -112,7 +112,7 @@ FlexLLama supports automatic model unloading to free up RAM when models are idle
 
 ## Environment Variables
 
-FlexLLama supports setting environment variables for runners and individual models. This is useful for configuring GPU devices, library paths, or other runtime settings.
+GreenMesh supports setting environment variables for runners and individual models. This is useful for configuring GPU devices, library paths, or other runtime settings.
 
 ```json
 {
@@ -141,7 +141,7 @@ FlexLLama supports setting environment variables for runners and individual mode
 
 ## Timeout Configuration
 
-FlexLLama supports configurable timeouts for long-running requests:
+GreenMesh supports configurable timeouts for long-running requests:
 
 ```json
 {
@@ -157,10 +157,10 @@ FlexLLama supports configurable timeouts for long-running requests:
 
 ## CORS Configuration
 
-By default FlexLLama does **not** emit CORS headers, so browser-based clients
+By default GreenMesh does **not** emit CORS headers, so browser-based clients
 loaded from a different origin cannot call the API. This is the safe default:
 allowing cross-origin access means any website a user visits can script
-requests against their FlexLLama instance (which has no authentication).
+requests against their GreenMesh instance (which has no authentication).
 
 To opt in, set `api.cors_allow_origins` to a list of origins:
 
@@ -174,7 +174,7 @@ To opt in, set `api.cors_allow_origins` to a list of origins:
 }
 ```
 
-- `[]` (default): CORS disabled. Recommended when FlexLLama is only called
+- `[]` (default): CORS disabled. Recommended when GreenMesh is only called
   from same-origin pages or from non-browser clients.
 - `["*"]`: Allow any origin (non-credentialed). Convenient for local dev;
   understand that any page in any browser on your network can then call
@@ -187,7 +187,7 @@ forwarded cross-origin regardless of this setting.
 
 ## GPU Metrics Configuration
 
-FlexLLama can collect real-time GPU telemetry and display it in the dashboard.
+GreenMesh can collect real-time GPU telemetry and display it in the dashboard.
 The feature supports both NVIDIA and AMD tools when present:
 
 - `nvidia-smi` for NVIDIA GPUs (Linux and Windows)
@@ -231,7 +231,7 @@ The feature supports both NVIDIA and AMD tools when present:
 
 - For NVIDIA metrics: `nvidia-smi` installed and available in `PATH`
 - For AMD metrics: `amd-smi` installed and available in `PATH` (part of ROCm)
-- GPU devices accessible to the FlexLLama process
+- GPU devices accessible to the GreenMesh process
 
 **Important Notes:**
 
@@ -242,7 +242,7 @@ The feature supports both NVIDIA and AMD tools when present:
 
 ## MCP Proxy Configuration
 
-FlexLLama can expose a single Model Context Protocol (MCP) endpoint that forwards requests to one of your models. It is **off by default** — when the `mcp` block is absent or `enabled` is `false`, nothing changes.
+GreenMesh can expose a single Model Context Protocol (MCP) endpoint that forwards requests to one of your models. It is **off by default** — when the `mcp` block is absent or `enabled` is `false`, nothing changes.
 
 To turn it on, add an `mcp` block and tag the model(s) it should use with `"mcp": true`:
 
@@ -265,35 +265,35 @@ To turn it on, add an `mcp` block and tag the model(s) it should use with `"mcp"
 **Options:**
 
 - `enabled`: Turn the MCP endpoint on or off (default: `false`).
-- `endpoint`: The path FlexLLama listens on (default: `/v1/mcp`).
+- `endpoint`: The path GreenMesh listens on (default: `/v1/mcp`).
 - `upstream_path`: The path on the model's llama-server that requests are forwarded to (default: `/mcp`).
 
 Once enabled, send your MCP (JSON-RPC) requests to `POST http://localhost:8080/v1/mcp`. If you tag more than one model, include a `"model"` field in the request to pick one; otherwise the first `mcp`-tagged model is used.
 
 > **Tip:** give the MCP model its own runner/port so an MCP request doesn't unload another model sharing that runner.
 >
-> **Note:** MCP support in llama.cpp is still evolving. If your `llama-server` build doesn't serve the MCP path, FlexLLama simply passes the upstream response back (it won't crash), and you can point `upstream_path` at wherever a future build serves it.
+> **Note:** MCP support in llama.cpp is still evolving. If your `llama-server` build doesn't serve the MCP path, GreenMesh simply passes the upstream response back (it won't crash), and you can point `upstream_path` at wherever a future build serves it.
 
 ## Configuration Options Reference
 
-### Runner Options
+### Cluster Options
 
 - `path`: Path to llama-server binary
 - `host`/`port`: Where to run this instance
 - `inherit_env`: Whether to inherit parent environment variables (default: `true`)
-- `env`: Dictionary of environment variables to set for all models on this runner
-- `extra_args`: Additional arguments for llama-server (applied to all models using this runner)
+- `env`: Dictionary of environment variables to set for all models on this cluster
+- `extra_args`: Additional arguments for llama-server (applied to all models using this cluster)
 - `auto_unload_timeout_seconds`: Automatically unload model after this many seconds of inactivity (0 disables, default: 0)
 
 ### Model Options
 
 #### Core Settings
 
-- `runner`: Which runner to use for this model
+- `cluster`: Which cluster to use for this model
 - `model`: Path to .gguf model file
 - `model_alias`: Name to use in API calls
-- `inherit_env`: Override runner's inherit_env setting for this model (optional)
-- `env`: Dictionary of environment variables specific to this model (overrides runner env)
+- `inherit_env`: Override cluster's inherit_env setting for this model (optional)
+- `env`: Dictionary of environment variables specific to this model (overrides cluster env)
 
 #### Model Types
 
@@ -341,7 +341,7 @@ Once enabled, send your MCP (JSON-RPC) requests to `POST http://localhost:8080/v
 
 ## Audio Endpoints
 
-FlexLLama can proxy OpenAI-style audio requests to a model that handles audio:
+GreenMesh can proxy OpenAI-style audio requests to a model that handles audio:
 
 - `POST /v1/audio/transcriptions` — speech-to-text (send an audio file, get text back).
 - `POST /v1/audio/speech` — text-to-speech (send text, get audio back; needs a TTS model).
@@ -364,7 +364,7 @@ For text-to-speech, also set `talker_model` / `code2wav_model` / `model_vocoder`
 
 ### Usage Examples
 
-All examples call FlexLLama on `http://localhost:8080`; it routes each request to the runner hosting your audio model. Replace the aliases with your own.
+All examples call GreenMesh on `http://localhost:8080`; it routes each request to the runner hosting your audio model. Replace the aliases with your own.
 
 **Speech-to-text (file upload):** the `/v1/audio/transcriptions` endpoint follows the OpenAI standard — it takes a `multipart/form-data` file upload, not JSON:
 
@@ -399,11 +399,11 @@ curl -sS http://localhost:8080/v1/chat/completions \
 ```bash
 curl -sS http://localhost:8080/v1/audio/speech \
   -H 'Content-Type: application/json' \
-  -d '{"model": "qwen3-omni-tts", "input": "Hello from FlexLLama.", "voice": "default", "response_format": "wav"}' \
+  -d '{"model": "qwen3-omni-tts", "input": "Hello from GreenMesh.", "voice": "default", "response_format": "wav"}' \
   --output speech.wav
 ```
 
-To check audio works end-to-end, run `python tests/test_audio.py` while FlexLLama is running.
+To check audio works end-to-end, run `python tests/test_audio.py` while GreenMesh is running.
 
 ## Validating Configuration
 

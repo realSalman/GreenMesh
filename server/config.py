@@ -1,7 +1,7 @@
 """
-Configuration parser for FlexLLama.
+Configuration parser for GreenMesh.
 
-This module handles loading, parsing, and validating configuration files for the FlexLLama.
+This module handles loading, parsing, and validating configuration files for GreenMesh.
 It ensures that all required fields are present and that values are of the correct type.
 """
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class ConfigManager:
-    """Manager for FlexLLama configuration."""
+    """Manager for GreenMesh configuration."""
 
     def __init__(self, config_path: str):
         """Initialize the configuration manager.
@@ -69,26 +69,28 @@ class ConfigManager:
         ):
             raise ValueError("Configuration must contain at least one model")
 
-        # Collect all runner names
-        runner_names = set()
+        # Collect all cluster (runner) names
+        cluster_names = set()
         for key, value in self.config.items():
             if key not in [
                 "models",
                 "host",
                 "port",
                 "api",
+                "auto_start_clusters",
                 "auto_start_runners",
                 "retry_config",
                 "metrics",
                 "mcp",
+                "federation",
                 "request_timeout_seconds",
                 "streaming_timeout_seconds",
             ] and isinstance(value, dict):
-                runner_names.add(key)
+                cluster_names.add(key)
 
-        # Validate models and their runner references
+        # Validate models and their cluster references
         for i, model in enumerate(self.config["models"]):
-            self._validate_model_config(model, i, runner_names)
+            self._validate_model_config(model, i, cluster_names)
 
         # Validate API configuration
         self._validate_api_config()
@@ -102,16 +104,19 @@ class ConfigManager:
         # Validate MCP proxy configuration
         self._validate_mcp_config()
 
-        # Validate auto_start_runners if present
-        if "auto_start_runners" in self.config:
+        # Validate auto_start_clusters if present
+        if "auto_start_clusters" in self.config:
+            if not isinstance(self.config["auto_start_clusters"], bool):
+                raise ValueError("auto_start_clusters must be a boolean")
+        elif "auto_start_runners" in self.config:
             if not isinstance(self.config["auto_start_runners"], bool):
                 raise ValueError("auto_start_runners must be a boolean")
 
-        # Validate runner configurations
+        # Validate cluster configurations
         used_ports = set()
-        for runner_name in runner_names:
+        for cluster_name in cluster_names:
             self._validate_runner_config(
-                self.config[runner_name], runner_name, used_ports
+                self.config[cluster_name], cluster_name, used_ports
             )
 
         logger.info("Configuration validation successful")
@@ -364,7 +369,7 @@ class ConfigManager:
         self.config (get_mcp_config supplies them), so configs without an "mcp"
         key behave exactly as before. When present, it must be a dictionary with
         an optional boolean "enabled" (default False), a string "endpoint"
-        (default "/v1/mcp", the public FlexLLama path) and a string
+        (default "/v1/mcp", the public GreenMesh path) and a string
         "upstream_path" (default "/mcp", the path on the target llama-server the
         JSON-RPC request is forwarded to).
 
@@ -415,34 +420,36 @@ class ConfigManager:
                 "mcp.rate_limit_requests_per_minute must be a positive integer"
             )
 
-    def _validate_model_config(self, model, index: int, runner_names: set):
+    def _validate_model_config(self, model, index: int, cluster_names: set):
         """Validate a model configuration.
 
         Args:
             model: The model configuration to validate.
             index: The index of the model in the configuration.
-            runner_names: Set of valid runner names.
+            cluster_names: Set of valid cluster names.
 
         Raises:
             ValueError: If the model configuration is invalid.
         """
-        # Check required fields
-        required_fields = ["model", "runner"]
-        for field in required_fields:
-            if field not in model:
-                raise ValueError(f"Model {index}: Missing required field: {field}")
+        # Support both 'cluster' and 'runner' for model reference
+        cluster_ref = model.get("cluster") or model.get("runner")
+        if not cluster_ref:
+            raise ValueError(f"Model {index}: Missing required field: cluster")
+
+        if "model" not in model:
+            raise ValueError(f"Model {index}: Missing required field: model")
 
         # Validate model path
         if not isinstance(model["model"], str):
             raise ValueError(f"Model {index}: Model path must be a string")
 
-        # Validate runner reference
-        if not isinstance(model["runner"], str):
-            raise ValueError(f"Model {index}: Runner reference must be a string")
+        # Validate cluster reference
+        if not isinstance(cluster_ref, str):
+            raise ValueError(f"Model {index}: Cluster reference must be a string")
 
-        if model["runner"] not in runner_names:
+        if cluster_ref not in cluster_names:
             raise ValueError(
-                f"Model {index}: Referenced runner '{model['runner']}' not found in configuration"
+                f"Model {index}: Referenced cluster '{cluster_ref}' not found in configuration"
             )
 
         # Validate optional fields
@@ -670,77 +677,41 @@ class ConfigManager:
 
         raise ValueError(f"Model alias not found: {model_alias}")
 
+    def get_cluster_config(self, cluster_name: str):
+        """Get a cluster configuration by name."""
+        if cluster_name not in self.config:
+            raise ValueError(f"Cluster not found: {cluster_name}")
+        return self.config[cluster_name]
+
     def get_runner_config(self, runner_name: str):
-        """Get a runner configuration by name.
+        """Alias for get_cluster_config."""
+        return self.get_cluster_config(runner_name)
 
-        Args:
-            runner_name: The name of the runner.
-
-        Returns:
-            The runner configuration.
-
-        Raises:
-            ValueError: If the runner name is not found.
-        """
-        if runner_name not in self.config:
-            raise ValueError(f"Runner not found: {runner_name}")
-
-        return self.config[runner_name]
+    def get_cluster_for_model(self, model_alias=None):
+        """Get the cluster configuration for a model."""
+        model = self.get_model_config(model_alias)
+        cluster_name = model.get("cluster") or model.get("runner")
+        cluster_config = self.get_cluster_config(cluster_name)
+        return cluster_name, cluster_config
 
     def get_runner_for_model(self, model_alias=None):
-        """Get the runner configuration for a model.
-
-        Args:
-            model_alias: The alias of the model. If None, uses the first model.
-
-        Returns:
-            Tuple of (runner_name, runner_config).
-
-        Raises:
-            ValueError: If the model alias or referenced runner is not found.
-        """
-        model = self.get_model_config(model_alias)
-        runner_name = model["runner"]
-        runner_config = self.get_runner_config(runner_name)
-        return runner_name, runner_config
+        """Alias for get_cluster_for_model."""
+        return self.get_cluster_for_model(model_alias)
 
     def get_host(self):
-        """Get the API server host.
-
-        This is an alias for get_api_host().
-
-        Returns:
-            The API server host.
-        """
         return self.get_api_host()
 
     def get_port(self):
-        """Get the API server port.
-
-        This is an alias for get_api_port().
-
-        Returns:
-            The API server port.
-        """
         return self.get_api_port()
 
     def get_model_aliases(self):
-        """Get all model aliases.
-
-        Returns:
-            A list of all model aliases.
-        """
         return [
             model.get("model_alias", os.path.basename(model["model"]))
             for model in self.config["models"]
         ]
 
-    def get_runner_names(self):
-        """Get all runner names.
-
-        Returns:
-            A list of all runner names.
-        """
+    def get_cluster_names(self):
+        """Get all cluster names."""
         return [
             key
             for key in self.config.keys()
@@ -750,6 +721,7 @@ class ConfigManager:
                 "host",
                 "port",
                 "api",
+                "auto_start_clusters",
                 "auto_start_runners",
                 "retry_config",
                 "metrics",
@@ -760,25 +732,31 @@ class ConfigManager:
             and isinstance(self.config[key], dict)
         ]
 
-    def get_model_runner_map(self):
-        """Get a mapping of model aliases to runner names.
+    def get_runner_names(self):
+        """Alias for get_cluster_names."""
+        return self.get_cluster_names()
 
-        Returns:
-            A dictionary mapping model aliases to runner names.
-        """
-        model_runner_map = {}
+    def get_model_cluster_map(self):
+        """Get a mapping of model aliases to cluster names."""
+        model_cluster_map = {}
         for model in self.config["models"]:
             alias = model.get("model_alias", os.path.basename(model["model"]))
-            model_runner_map[alias] = model["runner"]
-        return model_runner_map
+            model_cluster_map[alias] = model.get("cluster") or model.get("runner")
+        return model_cluster_map
+
+    def get_model_runner_map(self):
+        """Alias for get_model_cluster_map."""
+        return self.get_model_cluster_map()
+
+    def get_auto_start_clusters(self):
+        """Get the auto-start clusters setting."""
+        return self.config.get(
+            "auto_start_clusters", self.config.get("auto_start_runners", True)
+        )
 
     def get_auto_start_runners(self):
-        """Get the auto-start runners setting.
-
-        Returns:
-            True if runners should be auto-started, False otherwise. Defaults to True.
-        """
-        return self.config.get("auto_start_runners", True)
+        """Alias for get_auto_start_clusters."""
+        return self.get_auto_start_clusters()
 
     def get_api_host(self):
         """Get the API server host.
@@ -832,44 +810,32 @@ class ConfigManager:
             )
         return [str(o) for o in origins]
 
+    def get_cluster_host(self, cluster_name: str):
+        """Get the host for a specific cluster."""
+        if cluster_name not in self.config:
+            raise ValueError(f"Cluster not found: {cluster_name}")
+
+        cluster_config = self.config[cluster_name]
+        return cluster_config.get("host", self.get_api_host())
+
     def get_runner_host(self, runner_name: str):
-        """Get the host for a specific runner.
+        """Alias for get_cluster_host."""
+        return self.get_cluster_host(runner_name)
 
-        Args:
-            runner_name: The name of the runner.
+    def get_cluster_port(self, cluster_name: str):
+        """Get the port for a specific cluster."""
+        if cluster_name not in self.config:
+            raise ValueError(f"Cluster not found: {cluster_name}")
 
-        Returns:
-            The host for the runner, or API host if not specified.
-
-        Raises:
-            ValueError: If the runner name is not found.
-        """
-        if runner_name not in self.config:
-            raise ValueError(f"Runner not found: {runner_name}")
-
-        runner_config = self.config[runner_name]
-        return runner_config.get("host", self.get_api_host())
+        cluster_config = self.config[cluster_name]
+        if "port" in cluster_config:
+            return cluster_config["port"]
+        else:
+            raise ValueError(f"Cluster {cluster_name}: Port not configured")
 
     def get_runner_port(self, runner_name: str):
-        """Get the port for a specific runner.
-
-        Args:
-            runner_name: The name of the runner.
-
-        Returns:
-            The configured port for the runner.
-
-        Raises:
-            ValueError: If the runner name is not found or the port is not configured.
-        """
-        if runner_name not in self.config:
-            raise ValueError(f"Runner not found: {runner_name}")
-
-        runner_config = self.config[runner_name]
-        if "port" in runner_config:
-            return runner_config["port"]
-        else:
-            raise ValueError(f"Runner {runner_name}: Port not configured")
+        """Alias for get_cluster_port."""
+        return self.get_cluster_port(runner_name)
 
     def get_retry_config(self):
         """Get the retry configuration.
@@ -981,7 +947,7 @@ class ConfigManager:
         """Get the MCP proxy configuration with defaults applied.
 
         Returns a dictionary with the keys "enabled" (bool, default False),
-        "endpoint" (str, default "/v1/mcp", the public FlexLLama path) and
+        "endpoint" (str, default "/v1/mcp", the public GreenMesh path) and
         "upstream_path" (str, default "/mcp", the path forwarded to on the
         target llama-server). Any keys present in the config override the
         defaults; absent keys fall back to the safe defaults so that a config
@@ -1000,6 +966,27 @@ class ConfigManager:
         if not isinstance(mcp, dict):
             return defaults
         return {**defaults, **mcp}
+
+    def get_federation_config(self) -> dict:
+        """Get the federation configuration with defaults applied.
+
+        Returns:
+            The federation configuration dictionary with defaults applied.
+        """
+        defaults = {
+            "enabled": False,
+            "node_id": "auto",
+            "node_name": "PC-1",
+            "energy_source": "grid",
+            "advertise_address": f"http://{self.get_api_host()}:{self.get_api_port()}",
+            "peers": [],
+            "heartbeat_interval_seconds": 5,
+            "node_timeout_seconds": 15,
+        }
+        fed = self.config.get("federation", {})
+        if not isinstance(fed, dict):
+            return defaults
+        return {**defaults, **fed}
 
 
 if __name__ == "__main__":

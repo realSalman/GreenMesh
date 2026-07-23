@@ -1,5 +1,5 @@
 """
-GPU metrics collector for FlexLLama.
+GPU metrics collector for GreenMesh.
 
 Collects per-GPU telemetry via nvidia-smi and amd-smi (when available),
 normalizes the payload, and keeps bounded history for dashboard sparklines.
@@ -540,13 +540,13 @@ class RateLimiter:
         return allowed
 
 
-def build_runner_gpu_associations(
+def build_cluster_gpu_associations(
     config_manager, observed_gpus: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
-    """Build advisory runner-to-GPU associations from model config fields.
+    """Build advisory cluster-to-GPU associations from model config fields.
 
     Uses ``main_gpu``, non-zero ``tensor_split`` indices, and device selector
-    args (``--device`` / ``--device=``) to build advisory runner-to-GPU
+    args (``--device`` / ``--device=``) to build advisory cluster-to-GPU
     associations. When live GPU telemetry is available, selector indices are
     resolved against observed devices, with a one-based fallback only when an
     exact index does not exist for that selector's vendor scope.
@@ -555,8 +555,8 @@ def build_runner_gpu_associations(
     models = config_manager.get_config().get("models", [])
 
     for model in models:
-        runner_name = model.get("runner")
-        if not runner_name:
+        cluster_name = model.get("cluster") or model.get("runner")
+        if not cluster_name:
             continue
         model_alias = model.get("model_alias", "")
 
@@ -564,25 +564,27 @@ def build_runner_gpu_associations(
 
         model_arg_selectors = _extract_device_selectors(model.get("args"))
 
-        runner_arg_selectors: List[Dict[str, Any]] = []
+        cluster_arg_selectors: List[Dict[str, Any]] = []
 
         try:
-            runner_config = config_manager.get_runner_config(runner_name)
+            cluster_config = (
+                getattr(config_manager, "get_cluster_config", None) and config_manager.get_cluster_config(cluster_name)
+            ) or config_manager.get_runner_config(cluster_name)
         except Exception:
-            runner_config = {}
+            cluster_config = {}
 
-        runner_arg_selectors.extend(
-            _extract_device_selectors(runner_config.get("args"))
+        cluster_arg_selectors.extend(
+            _extract_device_selectors(cluster_config.get("args"))
         )
-        runner_arg_selectors.extend(
-            _extract_device_selectors(runner_config.get("extra_args"))
+        cluster_arg_selectors.extend(
+            _extract_device_selectors(cluster_config.get("extra_args"))
         )
 
-        explicit_selectors = model_arg_selectors + runner_arg_selectors
+        explicit_selectors = model_arg_selectors + cluster_arg_selectors
         selectors.extend(explicit_selectors)
 
         default_vendor = _infer_association_vendor_hint(
-            runner_name, runner_config, explicit_selectors, observed_gpus
+            cluster_name, cluster_config, explicit_selectors, observed_gpus
         )
 
         if default_vendor is not None:
@@ -604,24 +606,28 @@ def build_runner_gpu_associations(
 
         gpu_ids = _resolve_gpu_ids(selectors, observed_gpus)
 
-        if runner_name not in associations:
-            associations[runner_name] = {
+        if cluster_name not in associations:
+            associations[cluster_name] = {
                 "gpu_ids": set(),
                 "models": [],
             }
 
-        associations[runner_name]["gpu_ids"].update(gpu_ids)
-        associations[runner_name]["models"].append(model_alias)
+        associations[cluster_name]["gpu_ids"].update(gpu_ids)
+        associations[cluster_name]["models"].append(model_alias)
 
     serializable: Dict[str, Any] = {}
-    for runner_name, info in associations.items():
-        serializable[runner_name] = {
+    for cluster_name, info in associations.items():
+        serializable[cluster_name] = {
             "gpu_ids": sorted(info["gpu_ids"]),
             "models": info["models"],
             "attribution": "advisory",
         }
 
     return serializable
+
+
+# Alias for backward compatibility
+build_runner_gpu_associations = build_cluster_gpu_associations
 
 
 def _extract_device_selectors(args_value: Any) -> List[Dict[str, Any]]:

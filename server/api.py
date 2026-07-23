@@ -1,5 +1,5 @@
 """
-API server for FlexLLama.
+API server for GreenMesh.
 
 This module implements OpenAI-compatible API endpoints that route requests to the
 appropriate llama.cpp server instance based on the requested model. Supported
@@ -15,8 +15,13 @@ import aiohttp
 from aiohttp import web
 from pathlib import Path
 import importlib.resources
-from .runner import HealthStatus, HealthMessages
-from .gpu_metrics import GPUMetricsCollector, RateLimiter, build_runner_gpu_associations
+from .cluster import HealthStatus, HealthMessages
+from .gpu_metrics import (
+    GPUMetricsCollector,
+    RateLimiter,
+    build_cluster_gpu_associations,
+    build_runner_gpu_associations,
+)
 from .throughput_metrics import ThroughputMetricsCollector
 
 # Get logger for this module
@@ -32,15 +37,18 @@ class APIServer:
     (/v1/audio/transcriptions and /v1/audio/speech).
     """
 
-    def __init__(self, config_manager, runner_manager):
+    def __init__(self, config_manager, runner_manager, federation_manager=None):
         """Initialize the API server.
 
         Args:
             config_manager: The configuration manager.
-            runner_manager: The runner manager.
+            runner_manager: The cluster/runner manager.
+            federation_manager: The federation manager (optional).
         """
         self.config_manager = config_manager
+        self.cluster_manager = runner_manager
         self.runner_manager = runner_manager
+        self.federation_manager = federation_manager
 
         # Get host and port for API server from API-specific configuration
         self.host = config_manager.get_api_host()
@@ -145,13 +153,22 @@ class APIServer:
             web.post("/v1/responses", self.handle_responses),
             web.post("/v1/audio/transcriptions", self.handle_audio_transcriptions),
             web.post("/v1/audio/speech", self.handle_audio_speech),
-            # Runner control routes
+            # Cluster & Runner control routes
+            web.post("/v1/clusters/{cluster_name}/start", self.handle_runner_start),
+            web.post("/v1/clusters/{cluster_name}/stop", self.handle_runner_stop),
+            web.post("/v1/clusters/{cluster_name}/restart", self.handle_runner_restart),
+            web.get("/v1/clusters/status", self.handle_runners_status),
             web.post("/v1/runners/{runner_name}/start", self.handle_runner_start),
             web.post("/v1/runners/{runner_name}/stop", self.handle_runner_stop),
             web.post("/v1/runners/{runner_name}/restart", self.handle_runner_restart),
             web.get("/v1/runners/status", self.handle_runners_status),
             web.get(self.gpu_metrics_endpoint, self.handle_gpu_metrics),
             web.get(self.throughput_metrics_endpoint, self.handle_throughput_metrics),
+            # Federation routes
+            web.post("/v1/federation/heartbeat", self.handle_federation_heartbeat),
+            web.get("/v1/federation/nodes", self.handle_federation_nodes),
+            web.post("/v1/federation/energy", self.handle_federation_energy_set),
+            web.get("/v1/federation/energy", self.handle_federation_energy_get),
             # Dashboard routes
             web.get("/", self.handle_dashboard),
             web.get("/dashboard", self.handle_dashboard),
@@ -388,7 +405,12 @@ class APIServer:
             The response.
         """
         models = []
-        for alias in self.runner_manager.get_model_aliases():
+        if self.federation_manager and self.federation_manager.enabled:
+            model_aliases = self.federation_manager.get_federated_models()
+        else:
+            model_aliases = self.runner_manager.get_model_aliases()
+
+        for alias in model_aliases:
             models.append(
                 {
                     "id": alias,
@@ -526,16 +548,19 @@ class APIServer:
                     "message": f"{HealthMessages.HEALTH_CHECK_FAILED}: {str(e)}",
                 }
 
-        # Get current model assignments for each runner
+        # Get current model assignments for each cluster/runner
         runner_models = {}
         runner_info = {}
-        for runner_name in self.runner_manager.get_runner_names():
-            current_model = await self.runner_manager.get_current_model_for_runner(
+        active_clusters = {}
+        for runner_name in self.runner_manager.get_cluster_names():
+            current_model = await self.runner_manager.get_current_model_for_cluster(
                 runner_name
             )
             runner_models[runner_name] = current_model
+            is_act = active_runners.get(runner_name, False)
+            active_clusters[runner_name] = is_act
 
-            # Get runner info including host and port
+            # Get cluster info including host and port
             runner = self.runner_manager.runners.get(runner_name)
             if runner:
                 # Calculate auto-unload countdown
@@ -554,14 +579,17 @@ class APIServer:
                     "host": runner.host,
                     "port": runner.port,
                     "current_model": current_model,
-                    "is_active": active_runners.get(runner_name, False),
+                    "is_active": is_act,
                     "auto_unload_timeout_seconds": runner.auto_unload_timeout_seconds,
                     "auto_unload_countdown_seconds": auto_unload_countdown,
                 }
 
         response = {
             "status": "ok",
-            "active_runners": active_runners,
+            "active_clusters": active_clusters,
+            "cluster_current_models": runner_models,
+            "cluster_info": runner_info,
+            "active_runners": active_clusters,
             "runner_current_models": runner_models,
             "runner_info": runner_info,
             "model_health": model_health,
@@ -570,41 +598,33 @@ class APIServer:
         return web.json_response(response)
 
     async def handle_runner_start(self, request):
-        """Handle POST /v1/runners/{runner_name}/start requests.
-
-        Args:
-            request: The request.
-
-        Returns:
-            The response.
-        """
-        runner_name = request.match_info.get("runner_name")
-        if not runner_name:
+        """Handle POST /v1/clusters/{cluster_name}/start and /v1/runners/{runner_name}/start requests."""
+        cluster_name = request.match_info.get("cluster_name") or request.match_info.get("runner_name")
+        if not cluster_name:
             return web.json_response(
-                {"success": False, "error": {"message": "Runner name not provided"}},
+                {"success": False, "error": {"message": "Cluster name not provided"}},
                 status=400,
             )
 
-        # Check if runner exists
-        if runner_name not in self.runner_manager.get_runner_names():
+        if cluster_name not in self.runner_manager.get_cluster_names():
             return web.json_response(
                 {
                     "success": False,
-                    "error": {"message": f"Unknown runner: {runner_name}"},
+                    "error": {"message": f"Unknown cluster: {cluster_name}"},
                 },
                 status=404,
             )
 
         try:
-            # Start the runner
-            success = await self.runner_manager.start_runner(runner_name)
+            success = await self.runner_manager.start_cluster(cluster_name)
 
             if success:
                 return web.json_response(
                     {
                         "success": True,
-                        "message": f"Runner {runner_name} started successfully",
-                        "runner_name": runner_name,
+                        "message": f"Cluster {cluster_name} started successfully",
+                        "cluster_name": cluster_name,
+                        "runner_name": cluster_name,
                         "action": "start",
                         "status": "starting",
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -615,64 +635,58 @@ class APIServer:
                     {
                         "success": False,
                         "error": {
-                            "message": f"Failed to start runner: {runner_name}",
-                            "type": "runner_error",
-                            "runner_name": runner_name,
+                            "message": f"Failed to start cluster: {cluster_name}",
+                            "type": "cluster_error",
+                            "cluster_name": cluster_name,
+                            "runner_name": cluster_name,
                         },
                     },
                     status=500,
                 )
 
         except Exception as e:
-            logger.error(f"Error starting runner {runner_name}: {e}")
+            logger.error(f"Error starting cluster {cluster_name}: {e}")
             return web.json_response(
                 {
                     "success": False,
                     "error": {
-                        "message": f"Failed to start runner: {str(e)}",
-                        "type": "runner_error",
-                        "runner_name": runner_name,
+                        "message": f"Failed to start cluster: {str(e)}",
+                        "type": "cluster_error",
+                        "cluster_name": cluster_name,
+                        "runner_name": cluster_name,
                     },
                 },
                 status=500,
             )
 
     async def handle_runner_stop(self, request):
-        """Handle POST /v1/runners/{runner_name}/stop requests.
-
-        Args:
-            request: The request.
-
-        Returns:
-            The response.
-        """
-        runner_name = request.match_info.get("runner_name")
-        if not runner_name:
+        """Handle POST /v1/clusters/{cluster_name}/stop and /v1/runners/{runner_name}/stop requests."""
+        cluster_name = request.match_info.get("cluster_name") or request.match_info.get("runner_name")
+        if not cluster_name:
             return web.json_response(
-                {"success": False, "error": {"message": "Runner name not provided"}},
+                {"success": False, "error": {"message": "Cluster name not provided"}},
                 status=400,
             )
 
-        # Check if runner exists
-        if runner_name not in self.runner_manager.get_runner_names():
+        if cluster_name not in self.runner_manager.get_cluster_names():
             return web.json_response(
                 {
                     "success": False,
-                    "error": {"message": f"Unknown runner: {runner_name}"},
+                    "error": {"message": f"Unknown cluster: {cluster_name}"},
                 },
                 status=404,
             )
 
         try:
-            # Stop the runner
-            success = await self.runner_manager.stop_runner(runner_name)
+            success = await self.runner_manager.stop_cluster(cluster_name)
 
             if success:
                 return web.json_response(
                     {
                         "success": True,
-                        "message": f"Runner {runner_name} stopped successfully",
-                        "runner_name": runner_name,
+                        "message": f"Cluster {cluster_name} stopped successfully",
+                        "cluster_name": cluster_name,
+                        "runner_name": cluster_name,
                         "action": "stop",
                         "status": "stopping",
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -683,77 +697,68 @@ class APIServer:
                     {
                         "success": False,
                         "error": {
-                            "message": f"Failed to stop runner: {runner_name}",
-                            "type": "runner_error",
-                            "runner_name": runner_name,
+                            "message": f"Failed to stop cluster: {cluster_name}",
+                            "type": "cluster_error",
+                            "cluster_name": cluster_name,
+                            "runner_name": cluster_name,
                         },
                     },
                     status=500,
                 )
 
         except Exception as e:
-            logger.error(f"Error stopping runner {runner_name}: {e}")
+            logger.error(f"Error stopping cluster {cluster_name}: {e}")
             return web.json_response(
                 {
                     "success": False,
                     "error": {
-                        "message": f"Failed to stop runner: {str(e)}",
-                        "type": "runner_error",
-                        "runner_name": runner_name,
+                        "message": f"Failed to stop cluster: {str(e)}",
+                        "type": "cluster_error",
+                        "cluster_name": cluster_name,
+                        "runner_name": cluster_name,
                     },
                 },
                 status=500,
             )
 
     async def handle_runner_restart(self, request):
-        """Handle POST /v1/runners/{runner_name}/restart requests.
-
-        Args:
-            request: The request.
-
-        Returns:
-            The response.
-        """
-        runner_name = request.match_info.get("runner_name")
-        if not runner_name:
+        """Handle POST /v1/clusters/{cluster_name}/restart and /v1/runners/{runner_name}/restart requests."""
+        cluster_name = request.match_info.get("cluster_name") or request.match_info.get("runner_name")
+        if not cluster_name:
             return web.json_response(
-                {"success": False, "error": {"message": "Runner name not provided"}},
+                {"success": False, "error": {"message": "Cluster name not provided"}},
                 status=400,
             )
 
-        # Check if runner exists
-        if runner_name not in self.runner_manager.get_runner_names():
+        if cluster_name not in self.runner_manager.get_cluster_names():
             return web.json_response(
                 {
                     "success": False,
-                    "error": {"message": f"Unknown runner: {runner_name}"},
+                    "error": {"message": f"Unknown cluster: {cluster_name}"},
                 },
                 status=404,
             )
 
         try:
-            # Restart the runner (stop then start)
-            logger.info(f"Restarting runner {runner_name}")
+            logger.info(f"Restarting cluster {cluster_name}")
 
-            # Stop first
-            stop_success = await self.runner_manager.stop_runner(runner_name)
+            stop_success = await self.runner_manager.stop_cluster(cluster_name)
             if not stop_success:
                 logger.warning(
-                    f"Failed to stop runner {runner_name} during restart, continuing anyway"
+                    f"Failed to stop cluster {cluster_name} during restart, continuing anyway"
                 )
 
-            # Wait a bit for cleanup
             await asyncio.sleep(1)
 
-            # Start again
-            start_success = await self.runner_manager.start_runner(runner_name)
+            start_success = await self.runner_manager.start_cluster(cluster_name)
 
             if start_success:
                 return web.json_response(
                     {
                         "success": True,
-                        "message": f"Runner {runner_name} restarted successfully",
-                        "runner_name": runner_name,
+                        "message": f"Cluster {cluster_name} restarted successfully",
+                        "cluster_name": cluster_name,
+                        "runner_name": cluster_name,
                         "action": "restart",
                         "status": "restarting",
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -764,70 +769,55 @@ class APIServer:
                     {
                         "success": False,
                         "error": {
-                            "message": f"Failed to restart runner: {runner_name}",
-                            "type": "runner_error",
-                            "runner_name": runner_name,
+                            "message": f"Failed to restart cluster: {cluster_name}",
+                            "type": "cluster_error",
+                            "cluster_name": cluster_name,
+                            "runner_name": cluster_name,
                         },
                     },
                     status=500,
                 )
 
         except Exception as e:
-            logger.error(f"Error restarting runner {runner_name}: {e}")
+            logger.error(f"Error restarting cluster {cluster_name}: {e}")
             return web.json_response(
                 {
                     "success": False,
                     "error": {
-                        "message": f"Failed to restart runner: {str(e)}",
-                        "type": "runner_error",
-                        "runner_name": runner_name,
+                        "message": f"Failed to restart cluster: {str(e)}",
+                        "type": "cluster_error",
+                        "cluster_name": cluster_name,
+                        "runner_name": cluster_name,
                     },
                 },
                 status=500,
             )
 
     async def handle_runners_status(self, request):
-        """Handle GET /v1/runners/status requests.
-
-        Args:
-            request: The request.
-
-        Returns:
-            The response.
-        """
+        """Handle GET /v1/clusters/status and /v1/runners/status requests."""
         try:
-            status = await self.runner_manager.get_runner_status()
+            status = await self.runner_manager.get_cluster_status()
             return web.json_response(
                 {
                     "success": True,
+                    "clusters": status,
                     "runners": status,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 }
             )
 
         except Exception as e:
-            logger.error(f"Error getting runner status: {e}")
+            logger.error(f"Error getting cluster status: {e}")
             return web.json_response(
                 {
                     "success": False,
-                    "error": {"message": f"Failed to get runner status: {str(e)}"},
+                    "error": {"message": f"Failed to get cluster status: {str(e)}"},
                 },
                 status=500,
             )
 
     async def handle_gpu_metrics(self, request):
-        """Handle GET /v1/metrics/gpus requests.
-
-        Returns normalized GPU telemetry with bounded history and advisory
-        runner-to-GPU associations.  The endpoint is rate-limited per remote
-        IP to prevent abuse.
-
-        Args:
-            request: The request.
-
-        Returns:
-            The response.
-        """
+        """Handle GET /v1/metrics/gpus requests."""
         remote = request.remote or "unknown"
         allowed, retry_after = self.gpu_metrics_limiter.check(remote)
         if not allowed:
@@ -844,9 +834,10 @@ class APIServer:
 
         try:
             snapshot = self.gpu_metrics_collector.get_snapshot()
-            associations = build_runner_gpu_associations(
+            associations = build_cluster_gpu_associations(
                 self.config_manager, snapshot.get("gpus", [])
             )
+            snapshot["cluster_associations"] = associations
             snapshot["runner_associations"] = associations
             return web.json_response(snapshot)
 
@@ -910,6 +901,120 @@ class APIServer:
                 status=500,
             )
 
+    async def handle_federation_heartbeat(self, request):
+        """Handle POST /v1/federation/heartbeat from peer nodes."""
+        if not self.federation_manager or not self.federation_manager.enabled:
+            return web.json_response({"error": {"message": "Federation disabled"}}, status=400)
+        try:
+            data = await request.json()
+            response_data = self.federation_manager.handle_incoming_heartbeat(data)
+            return web.json_response(response_data)
+        except Exception as e:
+            logger.error(f"Error handling federation heartbeat: {e}")
+            return web.json_response({"error": {"message": str(e)}}, status=500)
+
+    async def handle_federation_nodes(self, request):
+        """Handle GET /v1/federation/nodes."""
+        if not self.federation_manager or not self.federation_manager.enabled:
+            return web.json_response({
+                "enabled": False,
+                "nodes": [],
+                "self_node_id": None
+            })
+        try:
+            nodes = self.federation_manager.get_all_nodes()
+            return web.json_response({
+                "enabled": True,
+                "nodes": nodes,
+                "self_node_id": self.federation_manager.node_id
+            })
+        except Exception as e:
+            logger.error(f"Error fetching federation nodes: {e}")
+            return web.json_response({"error": {"message": str(e)}}, status=500)
+
+    async def handle_federation_energy_set(self, request):
+        """Handle POST /v1/federation/energy."""
+        if not self.federation_manager:
+            return web.json_response({"error": {"message": "Federation manager unavailable"}}, status=400)
+        try:
+            data = await request.json()
+            source = data.get("source", "grid")
+            success = self.federation_manager.set_energy_source(source)
+            if success:
+                return web.json_response({
+                    "success": True,
+                    "energy_source": self.federation_manager.get_energy_source(),
+                    "greenness_score": self.federation_manager.get_greenness_score()
+                })
+            else:
+                return web.json_response({"error": {"message": "Invalid energy source. Must be solar, wind, or grid"}}, status=400)
+        except Exception as e:
+            return web.json_response({"error": {"message": str(e)}}, status=500)
+
+    async def handle_federation_energy_get(self, request):
+        """Handle GET /v1/federation/energy."""
+        if not self.federation_manager:
+            return web.json_response({
+                "energy_source": "grid",
+                "greenness_score": 20
+            })
+        return web.json_response({
+            "energy_source": self.federation_manager.get_energy_source(),
+            "greenness_score": self.federation_manager.get_greenness_score()
+        })
+
+    async def _proxy_to_remote_node(self, request, target_node, endpoint, data):
+        """Proxy a request to a remote federated node.
+
+        Args:
+            request: The original aiohttp request (needed for streaming prepare).
+            target_node: The NodeState of the remote node to proxy to.
+            endpoint: The API endpoint path (e.g. /v1/chat/completions).
+            data: The JSON request body.
+        """
+        target_url = f"{target_node.address}{endpoint}"
+        logger.info(f"Proxying request to remote greenest node '{target_node.node_name}' ({target_url})")
+
+        headers = {"X-GreenMesh-Routed": "true", "Content-Type": "application/json"}
+        is_streaming = data.get("stream", False)
+
+        routing_info = {
+            "handled_by": target_node.node_name,
+            "energy_source": target_node.energy_source,
+            "greenness_score": target_node.greenness_score,
+            "node_address": target_node.address,
+        }
+
+        try:
+            if is_streaming:
+                async with self._http_session.post(target_url, json=data, headers=headers) as response:
+                    stream_resp = web.StreamResponse(
+                        status=response.status,
+                        headers={
+                            "Content-Type": response.headers.get("Content-Type", "text/event-stream"),
+                            "Cache-Control": "no-cache",
+                            "Connection": "keep-alive",
+                        }
+                    )
+                    await stream_resp.prepare(request)
+
+                    async for chunk in response.content.iter_any():
+                        await stream_resp.write(chunk)
+
+                    # Append greenmesh_routing event before ending
+                    event_data = f"\ndata: {json.dumps({'greenmesh_routing': routing_info})}\n\n"
+                    await stream_resp.write(event_data.encode('utf-8'))
+                    return stream_resp
+            else:
+                async with self._http_session.post(target_url, json=data, headers=headers) as response:
+                    resp_json = await response.json()
+                    if isinstance(resp_json, dict):
+                        resp_json["greenmesh_routing"] = routing_info
+                    return web.json_response(resp_json, status=response.status)
+        except Exception as e:
+            logger.error(f"Failed to proxy request to remote node {target_node.address}: {e}")
+            return web.json_response({"error": {"message": f"Remote node proxy error: {str(e)}"}}, status=502)
+
     async def handle_chat_completions(self, request):
         """Handle POST /v1/chat/completions requests.
 
@@ -931,6 +1036,14 @@ class APIServer:
                 {"error": {"message": "Model not specified"}}, status=400
             )
 
+        # Check if already routed from another node to avoid loop
+        already_routed = request.headers.get("X-GreenMesh-Routed") == "true"
+
+        if not already_routed and self.federation_manager and self.federation_manager.enabled:
+            greenest_node = self.federation_manager.select_greenest_node(model_alias)
+            if greenest_node and not greenest_node.is_self:
+                return await self._proxy_to_remote_node(request, greenest_node, "/v1/chat/completions", data)
+
         try:
             self.config_manager.get_model_config(model_alias)
         except ValueError:
@@ -939,9 +1052,29 @@ class APIServer:
             )
 
         # Forward request with unified pre-flight approach
-        return await self._forward_request_unified(
+        response = await self._forward_request_unified(
             request, model_alias, "/v1/chat/completions", data
         )
+
+        # Attach local greenmesh_routing info if non-streaming JSON response
+        if self.federation_manager and isinstance(response, web.Response) and response.content_type == "application/json":
+            try:
+                raw_body = response.body
+                if raw_body:
+                    body = json.loads(raw_body.decode("utf-8") if isinstance(raw_body, bytes) else raw_body)
+                    if isinstance(body, dict) and "error" not in body:
+                        self_state = self.federation_manager.get_self_state()
+                        body["greenmesh_routing"] = {
+                            "handled_by": self_state.node_name,
+                            "energy_source": self_state.energy_source,
+                            "greenness_score": self_state.greenness_score,
+                            "node_address": self_state.address,
+                        }
+                        return web.json_response(body, status=response.status)
+            except Exception:
+                pass
+
+        return response
 
     async def handle_completions(self, request):
         """Handle POST /v1/completions requests.
@@ -963,6 +1096,14 @@ class APIServer:
             return web.json_response(
                 {"error": {"message": "Model not specified"}}, status=400
             )
+
+        # Check if already routed from another node to avoid loop
+        already_routed = request.headers.get("X-GreenMesh-Routed") == "true"
+
+        if not already_routed and self.federation_manager and self.federation_manager.enabled:
+            greenest_node = self.federation_manager.select_greenest_node(model_alias)
+            if greenest_node and not greenest_node.is_self:
+                return await self._proxy_to_remote_node(request, greenest_node, "/v1/completions", data)
 
         try:
             self.config_manager.get_model_config(model_alias)
